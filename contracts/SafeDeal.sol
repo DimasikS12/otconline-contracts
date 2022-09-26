@@ -1,18 +1,96 @@
 // SPDX-License-Identifier: MIT
 pragma solidity >=0.4.22 <0.9.0;
-import "./IERC20.sol";
+
+/**
+ * @dev Interface of the ERC20 standard as defined in the EIP.
+ */
+interface IERC20 {
+    /**
+     * @dev Emitted when `value` tokens are moved from one account (`from`) to
+     * another (`to`).
+     *
+     * Note that `value` may be zero.
+     */
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    /**
+     * @dev Emitted when the allowance of a `spender` for an `owner` is set by
+     * a call to {approve}. `value` is the new allowance.
+     */
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    /**
+     * @dev Returns the amount of tokens in existence.
+     */
+    function totalSupply() external view returns (uint256);
+
+    /**
+     * @dev Returns the amount of tokens owned by `account`.
+     */
+    function balanceOf(address account) external view returns (uint256);
+
+    /**
+     * @dev Moves `amount` tokens from the caller's account to `to`.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transfer(address to, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Returns the remaining number of tokens that `spender` will be
+     * allowed to spend on behalf of `owner` through {transferFrom}. This is
+     * zero by default.
+     *
+     * This value changes when {approve} or {transferFrom} are called.
+     */
+    function allowance(address owner, address spender) external view returns (uint256);
+
+    /**
+     * @dev Sets `amount` as the allowance of `spender` over the caller's tokens.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * IMPORTANT: Beware that changing an allowance with this method brings the risk
+     * that someone may use both the old and the new allowance by unfortunate
+     * transaction ordering. One possible solution to mitigate this race
+     * condition is to first reduce the spender's allowance to 0 and set the
+     * desired value afterwards:
+     * https://github.com/ethereum/EIPs/issues/20#issuecomment-263524729
+     *
+     * Emits an {Approval} event.
+     */
+    function approve(address spender, uint256 amount) external returns (bool);
+
+    /**
+     * @dev Moves `amount` tokens from `from` to `to` using the
+     * allowance mechanism. `amount` is then deducted from the caller's
+     * allowance.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) external returns (bool);
+}
 
 struct Deal {
     address payable seller;
     address payable buyer;
+    address payable referer;
     uint price;
-    uint fee;
-    uint date;
+    uint service_fee;
+    uint referer_fee;
 }
 
 // final version works with BUSD token
-contract SafeDeal {   
-    IERC20 private _token; 
+contract SafeDeal {
+    IERC20 private _token;
     address private _owner;
     address[] private _moderators;
     mapping(uint => Deal) private _deals; // active deals
@@ -46,54 +124,77 @@ contract SafeDeal {
     event BalanceAfterWithdraw(uint value);
 
     constructor() {
-        _token = IERC20(0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56); // token contract addr 
-        _owner = msg.sender;      
+        _token = IERC20(0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56); // token contract addr: 0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56
+        _owner = msg.sender;
     }
-    
-    function start(uint id, address payable seller, address payable buyer, uint price, uint fee) public payable {
+
+    function start(uint id, address payable seller, address payable buyer, address payable referer, uint price, uint service_fee, uint referer_fee) public payable {
         require(msg.sender == buyer, "this function can be called by buyer only");
         Deal memory deal = Deal({
             seller: seller,
             buyer: buyer,
+            referer: referer,
             price: price,
-            fee: fee,
-            date: block.timestamp
+            service_fee: service_fee,
+            referer_fee: referer_fee
         });
         _deals[id] = deal;
         _ids.push(id);
-        bool sent = _token.transferFrom(buyer, address(this), price + fee); // approve is not needed, it was done by external transaction
+        bool sent = _token.transferFrom(buyer, address(this), price + service_fee + referer_fee); // approve is not needed, it was done by external transaction
         require(sent, "payment to contract failed");
-        emit Started(id, deal);    
-    }  
-    
+        emit Started(id, deal);
+    }
+
     function completeByBuyer(uint id) public payable {
         Deal memory deal = _deals[id];
         require(deal.buyer == msg.sender, "this function can be called by buyer only");
+        // payment to seller
         bool approved = _token.approve(address(this), deal.price);
         require(approved, "approve failed");
         bool sent = _token.transferFrom(address(this), deal.seller, deal.price);
-        require(sent, "payment to seller failed");        
-        deleteDeal(id); // remove deal after completing
-        emit Completed(id, deal);        
+        require(sent, "payment to seller failed");
+
+        // payment to referer
+        if (deal.referer_fee > 0) {
+            approved = _token.approve(address(this), deal.referer_fee);
+            require(approved, "approve failed");
+            sent = _token.transferFrom(address(this), deal.referer, deal.referer_fee);
+            require(sent, "payment to referer failed");
+        }
+
+        // remove deal after completing
+        deleteDeal(id);
+        emit Completed(id, deal);
     }
 
     function completeByModerator(uint id) public onlyModerator payable {
         Deal memory deal = _deals[id];
+        // payment to seller
         bool approved = _token.approve(address(this), deal.price);
         require(approved, "approve failed");
         bool sent = _token.transferFrom(address(this), deal.seller, deal.price);
-        require(sent, "payment to seller failed");        
-        deleteDeal(id); // remove deal after completing
+        require(sent, "payment to seller failed");
+
+        // payment to referer
+        if (deal.referer_fee > 0) {
+            approved = _token.approve(address(this), deal.referer_fee);
+            require(approved, "approve failed");
+            sent = _token.transferFrom(address(this), deal.referer, deal.referer_fee);
+            require(sent, "payment to referer failed");
+        }
+
+        // remove deal after completing
+        deleteDeal(id);
         emit Completed(id, deal);
     }
 
     function cancelByModerator(uint id) public onlyModerator payable {
         Deal memory deal = _deals[id];
-        bool approved = _token.approve(address(this), deal.price + deal.fee);
+        bool approved = _token.approve(address(this), deal.price + deal.service_fee + deal.referer_fee);
         require(approved, "approve failed");
-        bool sent = _token.transferFrom(address(this), deal.buyer, deal.price + deal.fee);
-        require(sent, "payment to buyer failed");        
-        deleteDeal(id); // remove deal after completing  
+        bool sent = _token.transferFrom(address(this), deal.buyer, deal.price + deal.service_fee + deal.referer_fee);
+        require(sent, "payment to buyer failed");
+        deleteDeal(id); // remove deal after completing
         emit Cancelled(id, deal);
     }
 
@@ -134,7 +235,7 @@ contract SafeDeal {
         uint reserved = 0;
 
         for (uint i = 0; i < _ids.length; i++) {
-            reserved += (_deals[_ids[i]].price + _deals[_ids[i]].fee);
+            reserved += (_deals[_ids[i]].price + _deals[_ids[i]].service_fee + _deals[_ids[i]].referer_fee);
         }
 
         uint balance = _token.balanceOf(address(this)) - reserved;
@@ -173,5 +274,5 @@ contract SafeDeal {
         require(exists, "cant delete deal id, not found");
         _ids[index] = _ids[_ids.length - 1];
         _ids.pop();
-    }   
+    }
 }
